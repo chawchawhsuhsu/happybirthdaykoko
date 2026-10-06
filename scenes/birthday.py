@@ -1,7 +1,12 @@
 import av
 import cv2
 import streamlit as st
-from streamlit_webrtc import VideoProcessorBase, WebRtcMode, webrtc_streamer
+from streamlit_webrtc import (
+    RTCConfiguration,
+    VideoProcessorBase,
+    WebRtcMode,
+    webrtc_streamer,
+)
 
 from cv.blow_detector import BlowDetector
 from cv.cake import BirthdayCake
@@ -9,12 +14,28 @@ from cv.face_tracker import FaceTracker, ensure_model
 from cv.hearts import FallingHearts
 from cv.kisses import KissAnimationManager
 
+# 1. Reliable STUN server pool to fix aioice/STUN timeout crashes
+RTC_CONFIG = RTCConfiguration(
+    {
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]},
+            {"urls": ["stun:stun.cloudflare.com:3478"]},
+            {"urls": ["stun:stun.stunprotocol.org:3478"]},
+        ]
+    }
+)
+
+# 2. Cache FaceTracker so MediaPipe C-bindings aren't recreated on worker reconnects
+@st.cache_resource
+def get_face_tracker():
+    return FaceTracker(max_faces=1)
+
 
 class BirthdayProcessor(VideoProcessorBase):
     """Runs on a background thread for every live webcam frame."""
 
     def __init__(self):
-        self.tracker = FaceTracker(max_faces=1)
+        self.tracker = get_face_tracker()
         self.blow_detector = BlowDetector()
         self.kisses = KissAnimationManager(max_kisses=12)
         self.hearts = FallingHearts(count=20)
@@ -39,7 +60,16 @@ class BirthdayProcessor(VideoProcessorBase):
         if self.debug:
             bd = self.blow_detector
             txt = f"MAR {bd.last_mar:.2f} | width {bd.last_ratio:.2f} | blow {bd.blow_counter}/{bd.required_frames}"
-            cv2.putText(img, txt, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(
+                img,
+                txt,
+                (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
@@ -61,8 +91,8 @@ def show_birthday_scene():
     )
     st.caption("Click START, allow the camera, then purse your lips like an 'O' and blow the candles!")
 
-    if hasattr(__import__('mediapipe'), 'solutions') is False:
-        with st.spinner('Downloading face model (first run only)...'):
+    if hasattr(__import__("mediapipe"), "solutions") is False:
+        with st.spinner("Downloading face model (first run only)..."):
             ensure_model()
 
     ctx = webrtc_streamer(
@@ -70,7 +100,7 @@ def show_birthday_scene():
         mode=WebRtcMode.SENDRECV,
         video_processor_factory=BirthdayProcessor,
         media_stream_constraints={"video": True, "audio": False},
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        rtc_configuration=RTC_CONFIG,
         async_processing=True,
     )
 
