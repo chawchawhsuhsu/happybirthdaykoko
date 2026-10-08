@@ -22,27 +22,24 @@ from cv.kisses import KissAnimationManager
 # LOGGING
 # ============================================================
 
-# aioice/aiortc can produce noisy cleanup messages when a
-# WebRTC connection is restarted or the browser disconnects.
-logging.getLogger("aioice").setLevel(logging.CRITICAL)
-logging.getLogger("aiortc").setLevel(logging.CRITICAL)
+# WebRTC can produce noisy messages when a browser closes or
+# restarts a camera connection. Keep actual errors visible.
+logging.getLogger("aioice").setLevel(logging.ERROR)
+logging.getLogger("aiortc").setLevel(logging.ERROR)
+logging.getLogger("streamlit_webrtc").setLevel(logging.ERROR)
 
 
 # ============================================================
 # WEBRTC CONFIGURATION
 # ============================================================
 
-# Keep the configuration simple first.
+# Keep this simple.
 #
-# The old configuration used public TURN servers:
-#     openrelay.metered.ca
+# We intentionally do NOT use the old public TURN servers
+# from the previous version.
 #
-# Those public credentials are not reliable enough for a
-# deployed Streamlit application and can cause ICE connection
-# problems.
-#
-# STUN is sufficient for many users. If a particular network
-# requires TURN, a proper TURN server can be added later.
+# The first goal is to establish a clean WebRTC connection
+# using STUN.
 
 RTC_CONFIG = RTCConfiguration(
     {
@@ -64,26 +61,30 @@ RTC_CONFIG = RTCConfiguration(
 @st.cache_resource
 def get_face_tracker():
     """
-    Create one FaceTracker resource and reuse it across
-    Streamlit reruns.
+    Create and cache the face tracker.
+
+    Streamlit reruns the script frequently, so caching the
+    tracker prevents unnecessary recreation.
     """
     return FaceTracker(max_faces=1)
 
 
 # ============================================================
-# VIDEO PROCESSOR
+# BIRTHDAY VIDEO PROCESSOR
 # ============================================================
 
 class BirthdayProcessor(VideoProcessorBase):
     """
-    Processes webcam frames for the birthday scene.
+    Processes every webcam frame.
 
-    Existing CV modules are intentionally kept separate:
-        - FaceTracker
-        - BlowDetector
-        - BirthdayCake
-        - KissAnimationManager
-        - FallingHearts
+    The actual computer-vision features remain in their
+    separate modules:
+
+        FaceTracker
+        BlowDetector
+        BirthdayCake
+        KissAnimationManager
+        FallingHearts
     """
 
     def __init__(self):
@@ -101,16 +102,16 @@ class BirthdayProcessor(VideoProcessorBase):
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         """
-        Process one webcam frame.
+        Process one webcam frame and return the modified frame.
         """
 
         # ----------------------------------------------------
-        # Convert frame to OpenCV image
+        # Convert WebRTC frame -> OpenCV image
         # ----------------------------------------------------
 
         img = frame.to_ndarray(format="bgr24")
 
-        # Mirror webcam like a normal selfie camera
+        # Mirror webcam image
         img = cv2.flip(img, 1)
 
         # ----------------------------------------------------
@@ -120,23 +121,20 @@ class BirthdayProcessor(VideoProcessorBase):
         face = self.tracker.process_frame(img)
 
         # ----------------------------------------------------
-        # Blow out candles
+        # Blow detection
         # ----------------------------------------------------
 
-        if (
-            face
-            and self.cake.lit
-            and self.blow_detector.is_blowing(face)
-        ):
-            geometry = self.cake.geometry(img)
+        if face and self.cake.lit:
+            if self.blow_detector.is_blowing(face):
 
-            # Your existing BirthdayCake.geometry()
-            # returns the candle information used by the
-            # original implementation.
-            self.cake.blow_out(geometry[4])
+                # Get cake geometry from your existing module
+                geometry = self.cake.geometry(img)
 
-            # Reset detector counter after successful blow
-            self.blow_detector.blow_counter = 0
+                # Blow out candles
+                self.cake.blow_out(geometry[4])
+
+                # Reset detector
+                self.blow_detector.blow_counter = 0
 
         # ----------------------------------------------------
         # Kiss animation
@@ -154,27 +152,28 @@ class BirthdayProcessor(VideoProcessorBase):
         img = self.hearts.update_and_draw(img)
 
         # ----------------------------------------------------
-        # Birthday cake
+        # Cake
         # ----------------------------------------------------
 
         img = self.cake.draw(img)
 
         # ----------------------------------------------------
-        # Debug overlay
+        # Debug information
         # ----------------------------------------------------
 
         if self.debug:
             bd = self.blow_detector
 
-            text = (
+            debug_text = (
                 f"MAR {bd.last_mar:.2f} | "
                 f"width {bd.last_ratio:.2f} | "
-                f"blow {bd.blow_counter}/{bd.required_frames}"
+                f"blow "
+                f"{bd.blow_counter}/{bd.required_frames}"
             )
 
             cv2.putText(
                 img,
-                text,
+                debug_text,
                 (10, 25),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
@@ -184,7 +183,7 @@ class BirthdayProcessor(VideoProcessorBase):
             )
 
         # ----------------------------------------------------
-        # Convert OpenCV image back to WebRTC frame
+        # OpenCV image -> WebRTC frame
         # ----------------------------------------------------
 
         return av.VideoFrame.from_ndarray(
@@ -196,20 +195,20 @@ class BirthdayProcessor(VideoProcessorBase):
         """
         Called when the WebRTC session ends.
 
-        The individual CV modules do not need special cleanup,
-        so there is nothing to do here.
+        Your existing CV components don't require explicit
+        cleanup here.
         """
         pass
 
 
 # ============================================================
-# PAGE
+# BIRTHDAY PAGE
 # ============================================================
 
 def show_birthday_scene():
 
     # --------------------------------------------------------
-    # Streamlit configuration
+    # Streamlit page configuration
     # --------------------------------------------------------
 
     st.set_page_config(
@@ -219,7 +218,7 @@ def show_birthday_scene():
     )
 
     # --------------------------------------------------------
-    # Styling
+    # Page styling
     # --------------------------------------------------------
 
     st.markdown(
@@ -256,16 +255,18 @@ def show_birthday_scene():
     )
 
     # --------------------------------------------------------
-    # Title
+    # Birthday title
     # --------------------------------------------------------
 
     st.markdown(
         """
-        <h1 style="
-            text-align: center;
-            color: #ffd1dc;
-            margin-bottom: 0.2rem;
-        ">
+        <h1
+            style="
+                text-align: center;
+                color: #ffd1dc;
+                margin-bottom: 0.3rem;
+            "
+        >
             🎂 HAPPY BIRTHDAY! 🎂
         </h1>
         """,
@@ -274,11 +275,13 @@ def show_birthday_scene():
 
     st.markdown(
         """
-        <p style="
-            text-align: center;
-            color: #ffe8ee;
-            font-size: 1rem;
-        ">
+        <p
+            style="
+                text-align: center;
+                color: #ffe8ee;
+                font-size: 1rem;
+            "
+        >
             Click START, allow the camera,
             then purse your lips like an "O"
             and blow the candles! 💨🕯️
@@ -288,31 +291,34 @@ def show_birthday_scene():
     )
 
     # --------------------------------------------------------
-    # MediaPipe model
+    # Make sure MediaPipe/model is available
     # --------------------------------------------------------
 
     try:
         import mediapipe
 
         if not hasattr(mediapipe, "solutions"):
+
             with st.spinner(
-                "Preparing the face tracking model..."
+                "Preparing the face-tracking model..."
             ):
                 ensure_model()
 
     except Exception as e:
+
         st.error(
-            "The face-tracking component could not be initialized."
+            "The face-tracking component could not be "
+            "initialized."
         )
 
         st.caption(
-            f"Details: {type(e).__name__}: {e}"
+            f"{type(e).__name__}: {e}"
         )
 
         return
 
     # --------------------------------------------------------
-    # WebRTC camera
+    # WebRTC CAMERA
     # --------------------------------------------------------
 
     ctx = webrtc_streamer(
@@ -329,8 +335,7 @@ def show_birthday_scene():
 
         rtc_configuration=RTC_CONFIG,
 
-        # Keep processing asynchronous so the WebRTC
-        # communication thread is not unnecessarily blocked.
+        # Run video processing asynchronously.
         async_processing=True,
 
         sendback_audio=False,
@@ -340,41 +345,47 @@ def show_birthday_scene():
     # Controls
     # --------------------------------------------------------
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown(
+        "<br>",
+        unsafe_allow_html=True,
+    )
 
     col1, col2, col3 = st.columns(3)
 
-    # --------------------------------------------------------
-    # Kiss
-    # --------------------------------------------------------
+    # ========================================================
+    # SEND KISS
+    # ========================================================
 
     with col1:
+
         send_kiss = st.button(
             "💋 Send Kiss",
             use_container_width=True,
         )
 
-    # --------------------------------------------------------
-    # Relight
-    # --------------------------------------------------------
+    # ========================================================
+    # RELIGHT CANDLES
+    # ========================================================
 
     with col2:
+
         relight = st.button(
             "🕯️ Relight Candles",
             use_container_width=True,
         )
 
-    # --------------------------------------------------------
-    # Debug
-    # --------------------------------------------------------
+    # ========================================================
+    # DEBUG
+    # ========================================================
 
     with col3:
+
         debug = st.checkbox(
             "Debug overlay",
         )
 
     # --------------------------------------------------------
-    # Access processor
+    # Get active video processor
     # --------------------------------------------------------
 
     proc = ctx.video_processor
@@ -385,14 +396,14 @@ def show_birthday_scene():
         proc.debug = debug
 
         # ----------------------------------------------------
-        # Send kiss
+        # Kiss button
         # ----------------------------------------------------
 
         if send_kiss:
             proc.kisses.spawn_kiss()
 
         # ----------------------------------------------------
-        # Relight candles
+        # Relight button
         # ----------------------------------------------------
 
         if relight:
@@ -400,7 +411,7 @@ def show_birthday_scene():
 
 
 # ============================================================
-# RUN
+# MAIN
 # ============================================================
 
 if __name__ == "__main__":
