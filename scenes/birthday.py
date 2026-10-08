@@ -1,3 +1,4 @@
+import logging
 import av
 import cv2
 import streamlit as st
@@ -14,7 +15,11 @@ from cv.face_tracker import FaceTracker, ensure_model
 from cv.hearts import FallingHearts
 from cv.kisses import KissAnimationManager
 
-# 1. Reliable STUN server pool to fix aioice/STUN timeout crashes
+# 1. Suppress aioice and aiortc teardown errors during Streamlit script reruns
+logging.getLogger("aioice").setLevel(logging.ERROR)
+logging.getLogger("aiortc").setLevel(logging.ERROR)
+
+# 2. Reliable STUN server pool
 RTC_CONFIG = RTCConfiguration(
     {
         "iceServers": [
@@ -25,7 +30,7 @@ RTC_CONFIG = RTCConfiguration(
     }
 )
 
-# 2. Cache FaceTracker so MediaPipe C-bindings aren't recreated on worker reconnects
+# 3. Cache FaceTracker so MediaPipe C-bindings aren't recreated on reconnects
 @st.cache_resource
 def get_face_tracker():
     return FaceTracker(max_faces=1)
@@ -42,7 +47,7 @@ class BirthdayProcessor(VideoProcessorBase):
         self.cake = BirthdayCake()
         self.debug = False
 
-    def recv(self, frame):
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)  # mirror
 
@@ -73,8 +78,14 @@ class BirthdayProcessor(VideoProcessorBase):
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
+    def on_ended(self):
+        """Clean up when WebRTC session stops."""
+        pass
+
 
 def show_birthday_scene():
+    st.set_page_config(page_title="Happy Birthday!", page_icon="🎂")
+
     st.markdown(
         """
         <style>
@@ -102,6 +113,7 @@ def show_birthday_scene():
         media_stream_constraints={"video": True, "audio": False},
         rtc_configuration=RTC_CONFIG,
         async_processing=True,
+        sendback_audio=False,
     )
 
     col1, col2, col3 = st.columns(3)
