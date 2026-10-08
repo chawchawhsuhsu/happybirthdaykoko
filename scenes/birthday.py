@@ -15,22 +15,34 @@ from cv.face_tracker import FaceTracker, ensure_model
 from cv.hearts import FallingHearts
 from cv.kisses import KissAnimationManager
 
-# 1. Suppress aioice and aiortc teardown errors during Streamlit script reruns
+# 1. Suppress harmless aioice/aiortc cleanup logs during stream resets
 logging.getLogger("aioice").setLevel(logging.ERROR)
 logging.getLogger("aiortc").setLevel(logging.ERROR)
 
-# 2. Reliable STUN server pool
+# 2. Complete RTC Configuration with free TURN servers for cloud deployments
+# STUN alone fails on cloud hosts; TURN relays video traffic through strict firewalls/NATs.
 RTC_CONFIG = RTCConfiguration(
     {
         "iceServers": [
+            # Public STUN Servers
             {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]},
             {"urls": ["stun:stun.cloudflare.com:3478"]},
-            {"urls": ["stun:stun.stunprotocol.org:3478"]},
+            # Free TURN Relay Servers (Essential for Streamlit Cloud)
+            {
+                "urls": ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443"],
+                "username": "openrelayproject",
+                "credential": "openrelayproject",
+            },
+            {
+                "urls": ["turn:openrelay.metered.ca:443?transport=tcp"],
+                "username": "openrelayproject",
+                "credential": "openrelayproject",
+            },
         ]
     }
 )
 
-# 3. Cache FaceTracker so MediaPipe C-bindings aren't recreated on reconnects
+# 3. Cache FaceTracker across session reruns
 @st.cache_resource
 def get_face_tracker():
     return FaceTracker(max_faces=1)
@@ -53,7 +65,7 @@ class BirthdayProcessor(VideoProcessorBase):
 
         face = self.tracker.process_frame(img)
 
-        # blow out candles
+        # Blow out candles
         if face and self.cake.lit and self.blow_detector.is_blowing(face):
             self.cake.blow_out(self.cake.geometry(img)[4])
             self.blow_detector.blow_counter = 0
@@ -112,7 +124,7 @@ def show_birthday_scene():
         video_processor_factory=BirthdayProcessor,
         media_stream_constraints={"video": True, "audio": False},
         rtc_configuration=RTC_CONFIG,
-        async_processing=True,
+        async_processing=False,  # Set to False to fix processing lag/deadlocks on cloud servers
         sendback_audio=False,
     )
 
