@@ -1,15 +1,7 @@
-import logging
-
 import av
 import cv2
 import streamlit as st
-
-from streamlit_webrtc import (
-    RTCConfiguration,
-    VideoProcessorBase,
-    WebRtcMode,
-    webrtc_streamer,
-)
+from streamlit_webrtc import VideoProcessorBase, WebRtcMode, webrtc_streamer
 
 from cv.blow_detector import BlowDetector
 from cv.cake import BirthdayCake
@@ -18,401 +10,119 @@ from cv.hearts import FallingHearts
 from cv.kisses import KissAnimationManager
 
 
-# ============================================================
-# LOGGING
-# ============================================================
+# ------------------------------------------------------------------
+# TURN / STUN servers (needed on Streamlit Cloud)
+# ------------------------------------------------------------------
+@st.cache_data(ttl=3600)
+def get_ice_servers():
+    """Uses Twilio TURN if secrets are set, otherwise falls back to free STUN."""
+    fallback = [{"urls": ["stun:stun.l.google.com:19302"]}]
+    try:
+        from twilio.rest import Client
 
-# WebRTC can produce noisy messages when a browser closes or
-# restarts a camera connection. Keep actual errors visible.
-logging.getLogger("aioice").setLevel(logging.ERROR)
-logging.getLogger("aiortc").setLevel(logging.ERROR)
-logging.getLogger("streamlit_webrtc").setLevel(logging.ERROR)
-
-
-# ============================================================
-# WEBRTC CONFIGURATION
-# ============================================================
-
-# Keep this simple.
-#
-# We intentionally do NOT use the old public TURN servers
-# from the previous version.
-#
-# The first goal is to establish a clean WebRTC connection
-# using STUN.
-
-RTC_CONFIG = RTCConfiguration(
-    {
-        "iceServers": [
-            {
-                "urls": [
-                    "stun:stun.l.google.com:19302",
-                ]
-            }
-        ]
-    }
-)
+        client = Client(st.secrets["TWILIO_ACCOUNT_SID"], st.secrets["TWILIO_AUTH_TOKEN"])
+        return client.tokens.create().ice_servers
+    except Exception as e:
+        print("TURN unavailable, using STUN only:", repr(e))
+        return fallback
 
 
-# ============================================================
-# FACE TRACKER
-# ============================================================
-
-@st.cache_resource
-def get_face_tracker():
-    """
-    Create and cache the face tracker.
-
-    Streamlit reruns the script frequently, so caching the
-    tracker prevents unnecessary recreation.
-    """
-    return FaceTracker(max_faces=1)
-
-
-# ============================================================
-# BIRTHDAY VIDEO PROCESSOR
-# ============================================================
-
+# ------------------------------------------------------------------
+# Live video processor (runs on a background thread for every frame)
+# ------------------------------------------------------------------
 class BirthdayProcessor(VideoProcessorBase):
-    """
-    Processes every webcam frame.
-
-    The actual computer-vision features remain in their
-    separate modules:
-
-        FaceTracker
-        BlowDetector
-        BirthdayCake
-        KissAnimationManager
-        FallingHearts
-    """
-
     def __init__(self):
-        # Face tracking
-        self.tracker = get_face_tracker()
-
-        # Existing birthday components
+        self.tracker = FaceTracker(max_faces=1)
         self.blow_detector = BlowDetector()
         self.kisses = KissAnimationManager(max_kisses=12)
         self.hearts = FallingHearts(count=20)
         self.cake = BirthdayCake()
-
-        # Debug mode
         self.debug = False
 
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        """
-        Process one webcam frame and return the modified frame.
-        """
-
-        # ----------------------------------------------------
-        # Convert WebRTC frame -> OpenCV image
-        # ----------------------------------------------------
-
+    def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
+        try:
+            img = cv2.flip(img, 1)  # mirror
 
-        # Mirror webcam image
-        img = cv2.flip(img, 1)
+            face = self.tracker.process_frame(img)
 
-        # ----------------------------------------------------
-        # Face tracking
-        # ----------------------------------------------------
-
-        face = self.tracker.process_frame(img)
-
-        # ----------------------------------------------------
-        # Blow detection
-        # ----------------------------------------------------
-
-        if face and self.cake.lit:
-            if self.blow_detector.is_blowing(face):
-
-                # Get cake geometry from your existing module
-                geometry = self.cake.geometry(img)
-
-                # Blow out candles
-                self.cake.blow_out(geometry[4])
-
-                # Reset detector
+            # blow out candles
+            if face and self.cake.lit and self.blow_detector.is_blowing(face):
+                self.cake.blow_out(self.cake.geometry(img)[4])
                 self.blow_detector.blow_counter = 0
 
-        # ----------------------------------------------------
-        # Kiss animation
-        # ----------------------------------------------------
+            img = self.kisses.update_and_draw(img, face)
+            img = self.hearts.update_and_draw(img)
+            img = self.cake.draw(img)
 
-        img = self.kisses.update_and_draw(
-            img,
-            face,
-        )
+            if self.debug:
+                bd = self.blow_detector
+                txt = (
+                    f"MAR {bd.last_mar:.2f} | width {bd.last_ratio:.2f} | "
+                    f"blow {bd.blow_counter}/{bd.required_frames}"
+                )
+                cv2.putText(img, txt, (10, 25), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6, (255, 255, 255), 2, cv2.LINE_AA)
+        except Exception as e:
+            print("Frame error:", repr(e))  # shows in terminal / cloud logs
 
-        # ----------------------------------------------------
-        # Falling hearts
-        # ----------------------------------------------------
-
-        img = self.hearts.update_and_draw(img)
-
-        # ----------------------------------------------------
-        # Cake
-        # ----------------------------------------------------
-
-        img = self.cake.draw(img)
-
-        # ----------------------------------------------------
-        # Debug information
-        # ----------------------------------------------------
-
-        if self.debug:
-            bd = self.blow_detector
-
-            debug_text = (
-                f"MAR {bd.last_mar:.2f} | "
-                f"width {bd.last_ratio:.2f} | "
-                f"blow "
-                f"{bd.blow_counter}/{bd.required_frames}"
-            )
-
-            cv2.putText(
-                img,
-                debug_text,
-                (10, 25),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-
-        # ----------------------------------------------------
-        # OpenCV image -> WebRTC frame
-        # ----------------------------------------------------
-
-        return av.VideoFrame.from_ndarray(
-            img,
-            format="bgr24",
-        )
-
-    def on_ended(self):
-        """
-        Called when the WebRTC session ends.
-
-        Your existing CV components don't require explicit
-        cleanup here.
-        """
-        pass
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 
-# ============================================================
-# BIRTHDAY PAGE
-# ============================================================
-
+# ------------------------------------------------------------------
+# Main birthday scene
+# ------------------------------------------------------------------
 def show_birthday_scene():
-
-    # --------------------------------------------------------
-    # Streamlit page configuration
-    # --------------------------------------------------------
-
-    st.set_page_config(
-        page_title="Happy Birthday!",
-        page_icon="🎂",
-        layout="centered",
-    )
-
-    # --------------------------------------------------------
-    # Page styling
-    # --------------------------------------------------------
-
     st.markdown(
         """
         <style>
-
-        #MainMenu,
-        header,
-        footer {
-            visibility: hidden;
-        }
-
-        .stApp {
-            background:
-                linear-gradient(
-                    135deg,
-                    #180e30,
-                    #32152f,
-                    #54283f
-                );
-
-            color: #fff0eb;
-        }
-
-        .block-container {
-            max-width: 900px;
-            padding-top: 1rem;
-            padding-bottom: 2rem;
-        }
-
+        #MainMenu, header, footer { visibility: hidden; }
+        .stApp { background: linear-gradient(135deg, #180e30, #32152f, #54283f); color: #fff0eb; }
+        .block-container { max-width: 900px; padding-top: 1rem; }
         </style>
         """,
         unsafe_allow_html=True,
     )
-
-    # --------------------------------------------------------
-    # Birthday title
-    # --------------------------------------------------------
-
     st.markdown(
-        """
-        <h1
-            style="
-                text-align: center;
-                color: #ffd1dc;
-                margin-bottom: 0.3rem;
-            "
-        >
-            🎂 HAPPY BIRTHDAY! 🎂
-        </h1>
-        """,
+        "<h1 style='text-align: center; color: #ffd1dc;'>🎂 HAPPY BIRTHDAY! 🎂</h1>",
         unsafe_allow_html=True,
     )
+    st.caption("Click START, allow the camera, then purse your lips like an 'O' and blow the candles!")
 
-    st.markdown(
-        """
-        <p
-            style="
-                text-align: center;
-                color: #ffe8ee;
-                font-size: 1rem;
-            "
-        >
-            Click START, allow the camera,
-            then purse your lips like an "O"
-            and blow the candles! 💨🕯️
-        </p>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # --------------------------------------------------------
-    # Make sure MediaPipe/model is available
-    # --------------------------------------------------------
-
-    try:
-        import mediapipe
-
-        if not hasattr(mediapipe, "solutions"):
-
-            with st.spinner(
-                "Preparing the face-tracking model..."
-            ):
-                ensure_model()
-
-    except Exception as e:
-
-        st.error(
-            "The face-tracking component could not be "
-            "initialized."
-        )
-
-        st.caption(
-            f"{type(e).__name__}: {e}"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # WebRTC CAMERA
-    # --------------------------------------------------------
+    # Make sure the face model exists before the webcam starts
+    # (streamlit-webrtc only allows ~10s for the processor to start)
+    with st.spinner("Preparing face model (first run only)..."):
+        try:
+            ensure_model()
+        except Exception as e:
+            st.error(f"Could not download the face model: {e}")
+            st.stop()
 
     ctx = webrtc_streamer(
         key="birthday",
-
         mode=WebRtcMode.SENDRECV,
-
         video_processor_factory=BirthdayProcessor,
-
-        media_stream_constraints={
-            "video": True,
-            "audio": False,
-        },
-
-        rtc_configuration=RTC_CONFIG,
-
-        # Run video processing asynchronously.
+        media_stream_constraints={"video": True, "audio": False},
+        rtc_configuration={"iceServers": get_ice_servers()},
         async_processing=True,
-
-        sendback_audio=False,
-    )
-
-    # --------------------------------------------------------
-    # Controls
-    # --------------------------------------------------------
-
-    st.markdown(
-        "<br>",
-        unsafe_allow_html=True,
     )
 
     col1, col2, col3 = st.columns(3)
-
-    # ========================================================
-    # SEND KISS
-    # ========================================================
-
     with col1:
-
-        send_kiss = st.button(
-            "💋 Send Kiss",
-            use_container_width=True,
-        )
-
-    # ========================================================
-    # RELIGHT CANDLES
-    # ========================================================
-
+        send = st.button("💋 Send Kiss")
     with col2:
-
-        relight = st.button(
-            "🕯️ Relight Candles",
-            use_container_width=True,
-        )
-
-    # ========================================================
-    # DEBUG
-    # ========================================================
-
+        relight = st.button("🕯️ Relight Candles")
     with col3:
-
-        debug = st.checkbox(
-            "Debug overlay",
-        )
-
-    # --------------------------------------------------------
-    # Get active video processor
-    # --------------------------------------------------------
+        debug = st.checkbox("Debug overlay")
 
     proc = ctx.video_processor
-
-    if proc is not None:
-
-        # Update debug mode
+    if proc:
         proc.debug = debug
-
-        # ----------------------------------------------------
-        # Kiss button
-        # ----------------------------------------------------
-
-        if send_kiss:
+        if send:
             proc.kisses.spawn_kiss()
-
-        # ----------------------------------------------------
-        # Relight button
-        # ----------------------------------------------------
-
         if relight:
             proc.cake.relight()
 
-
-# ============================================================
-# MAIN
-# ============================================================
 
 if __name__ == "__main__":
     show_birthday_scene()
