@@ -103,8 +103,10 @@ def show_birthday_scene():
         mode=WebRtcMode.SENDRECV,
         video_processor_factory=BirthdayProcessor,
         media_stream_constraints={"video": True, "audio": False},
-        rtc_configuration={"iceServers": get_ice_servers()},
-        async_processing=True,
+       rtc_configuration={
+    "iceServers": get_ice_servers(),
+    "iceTransportPolicy": "relay",
+},
     )
 
     col1, col2, col3 = st.columns(3)
